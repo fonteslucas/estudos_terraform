@@ -4,6 +4,7 @@ variable "vpcname" {
 
 resource "aws_vpc" "myterraform_vpc" {
     cidr_block = "172.31.0.0/16"
+    enable_dns_hostnames = true
     tags = {
       "Name" = var.vpcname
       "auto-delete" = "never"

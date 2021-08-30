@@ -16,7 +16,6 @@ variable "pvt_subnetid_b" {
 
 resource "aws_route_table" "myterraform_private_rtb" {
   vpc_id = var.vpcid
-  route = []
   tags = {
       "Name" = "myterraform_private_rtb"
       "auto-delete" = "never"
