@@ -260,7 +260,8 @@ resource "aws_iam_policy" "codebuild_terraform_policy" {
                     "cloudwatch:GetDashboard",
                     "cloudwatch:PutDashboard",
                     "cloudwatch:PutMetricData",
-                    "cloudwatch:DeleteDashboards"
+                    "cloudwatch:DeleteDashboards",
+                    "application-autoscaling:*"
                 ],
                 "Effect": "Allow",
                 "Resource": "*"
