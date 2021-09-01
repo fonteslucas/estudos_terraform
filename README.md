@@ -1,1 +1,0 @@
-# estudos_terraform
