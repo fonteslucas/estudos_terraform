@@ -221,7 +221,7 @@ resource "aws_iam_policy" "codebuild_terraform_policy" {
             "s3:PutObject"
           ],
           "Effect" : "Allow",
-          "Resource" : "${aws_s3_bucket.tfstate_bucket.arn}/${var.source_repo_name}-${var.source_repo_branch}.tfstate"
+          "Resource" : "${aws_s3_bucket.tfstate_bucket.arn}/*"
         },
         {
           "Action" : [
@@ -235,6 +235,7 @@ resource "aws_iam_policy" "codebuild_terraform_policy" {
         {
           "Action" : [
             "ecr:*",
+            "codebuild:*",
             "ecs:*",
             "iam:*",
             "logs:*",
@@ -422,18 +423,6 @@ resource "aws_codebuild_project" "codebuild_tfsec" {
     type                        = "LINUX_CONTAINER"
     privileged_mode             = false
     image_pull_credentials_type = "CODEBUILD"
-    environment_variable {
-      name  = "AWS_ACCOUNT_ID"
-      value = data.aws_caller_identity.current.account_id
-    }
-    environment_variable {
-      name  = "AWS_DEFAULT_REGION"
-      value = data.aws_region.current.name
-    }
-    environment_variable {
-      name  = "TF_VERSION"
-      value = "1.0.5"
-    }
   }
   source {
     type      = "CODEPIPELINE"
@@ -443,23 +432,61 @@ resource "aws_codebuild_project" "codebuild_tfsec" {
             pre_build:
                 commands:
                 - echo "Executing tfsec"
-                - mkdir -p $CODEBUILD_SRC_DIR/infra/reports/tfsec/
-                - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
+                - mkdir -p $CODEBUILD_SRC_DIR/infra/tfsec/
+            build:
+                commands:
+                - tfsec --version
+                - cd $CODEBUILD_SRC_DIR/infra
+                - ls
+                - tfsec -s --tfvars-file terraform.tfvars --format junit > tfsec/report.xml
+                - ls tfsec
+        reports:
+            tfsec-reports:
+              files: 
+                - infra/tfsec/*.xml
+              file-format: "JUNITXML"
+    BUILDSPEC
+  }
+}
+
+resource "aws_codebuild_project" "codebuild_tflint" {
+  depends_on = [
+    aws_codecommit_repository.source_repo
+  ]
+  name         = "codebuild_tflint-${var.source_repo_name}-${var.source_repo_branch}"
+  service_role = aws_iam_role.codebuild_terraform_role.arn
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "aws/codebuild/amazonlinux2-x86_64-standard:2.0"
+    type                        = "LINUX_CONTAINER"
+    privileged_mode             = false
+    image_pull_credentials_type = "CODEBUILD"
+  }
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = <<BUILDSPEC
+        version: 0.2
+        phases:
+            pre_build:
+                commands:
+                - echo "Executing tflint"
+                - mkdir -p $CODEBUILD_SRC_DIR/infra/tflint/
+                - curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
             build:
                 commands:
                 - cd "$CODEBUILD_SRC_DIR/infra"
-                - tfsec -s code_security_checks/tfsec/tfsec.yml .
-                - tfsec -s code_security_checks/tfsec/tfsec.yml . --format junit > reports/tfsec/report.xml
-                - num_errors=`tfsec -s --config-file code_security_checks/tfsec/tfsec.yml . |  grep ERROR | wc -l`
-                - export BuildID=`echo $CODEBUILD_BUILD_ID | cut -d: -f1`
-                - export BuildTag=`echo $CODEBUILD_BUILD_ID | cut -d: -f2`
-                - export Region=$AWS_REGION
-                - export checks_failed=$num_errors
-            reports:
-                tfsec-reports:
-                  files: 
-                    reports/tfsec/*.xml
-                  file-format": "JUNITXML
+                - tflint --init
+                - ls
+                - tflint -f junit > "tflint/tflint_report.xml"
+                - ls tflint
+        reports:
+            tflint:
+              files:
+                - infra/tflint/*.xml
+              file-format": "JUNITXML"
     BUILDSPEC
   }
 }
@@ -577,6 +604,7 @@ resource "aws_codepipeline" "pipeline" {
     aws_codebuild_project.codebuild,
     aws_codebuild_project.codebuild_terraform,
     aws_codebuild_project.codebuild_terraform_plan,
+    aws_codebuild_project.codebuild_tflint,
     aws_codebuild_project.codebuild_tfsec
   ]
   name     = "${var.source_repo_name}-${var.source_repo_branch}-Pipeline"
@@ -620,7 +648,7 @@ resource "aws_codepipeline" "pipeline" {
     }
   }
   stage {
-    name = "tf-sec"
+    name = "tf-sec-lint"
     action {
       name = "tf-sec"
       category        = "Build"
@@ -631,6 +659,18 @@ resource "aws_codepipeline" "pipeline" {
       run_order       = 1
       configuration = {
         ProjectName = aws_codebuild_project.codebuild_tfsec.id
+      }
+    }
+    action {
+      name = "tf-lint"
+      category        = "Build"
+      owner           = "AWS"
+      version         = "1"
+      provider        = "CodeBuild"
+      input_artifacts = ["SourceOutput"]
+      run_order       = 1
+      configuration = {
+        ProjectName = aws_codebuild_project.codebuild_tflint.id
       }
     }
   }
