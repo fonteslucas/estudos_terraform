@@ -444,6 +444,7 @@ resource "aws_codebuild_project" "codebuild_tfsec" {
                 commands:
                 - echo "Executing tfsec"
                 - mkdir -p $CODEBUILD_SRC_DIR/infra/reports/tfsec/
+                - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
             build:
                 commands:
                 - cd "$CODEBUILD_SRC_DIR/infra"
@@ -463,6 +464,59 @@ resource "aws_codebuild_project" "codebuild_tfsec" {
   }
 }
 
+resource "aws_codebuild_project" "codebuild_terraform_plan" {
+  depends_on = [
+    aws_codecommit_repository.source_repo
+  ]
+  name         = "codebuild_terraform_plan-${var.source_repo_name}-${var.source_repo_branch}"
+  service_role = aws_iam_role.codebuild_terraform_role.arn
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+  environment {
+    compute_type                = "BUILD_GENERAL1_SMALL"
+    image                       = "aws/codebuild/amazonlinux2-x86_64-standard:2.0"
+    type                        = "LINUX_CONTAINER"
+    privileged_mode             = false
+    image_pull_credentials_type = "CODEBUILD"
+    environment_variable {
+      name  = "AWS_ACCOUNT_ID"
+      value = data.aws_caller_identity.current.account_id
+    }
+    environment_variable {
+      name  = "AWS_DEFAULT_REGION"
+      value = data.aws_region.current.name
+    }
+    environment_variable {
+      name  = "TF_VERSION"
+      value = "1.0.5"
+    }
+  }
+  source {
+    type      = "CODEPIPELINE"
+    buildspec = <<BUILDSPEC
+        version: 0.2
+        phases:
+            install:
+                commands:
+                - "cd /usr/bin"
+                - "curl -s -qL -o terraform.zip https://releases.hashicorp.com/terraform/$${TF_VERSION}/terraform_$${TF_VERSION}_linux_amd64.zip"
+                - "unzip -o terraform.zip"
+            build:
+                commands:
+                - echo Terraform deployment started on `date`
+                - cd "$CODEBUILD_SRC_DIR/infra"
+                - echo "terraform" { > backend.tf
+                - echo "   backend \"s3\" {} " >> backend.tf
+                - echo "}" >> backend.tf
+                - terraform init -input=false --backend-config="bucket=${aws_s3_bucket.tfstate_bucket.id}" --backend-config="key=${var.source_repo_name}-${var.source_repo_branch}.tfsate" --backend-config="region=${data.aws_region.current.name}"
+                - terraform plan -input=false -var-file=./terraform.tfvars
+            post_build:
+                commands:
+                - echo "Terraform completed on `date`"
+    BUILDSPEC
+  }
+}
 
 resource "aws_codebuild_project" "codebuild_terraform" {
   depends_on = [
@@ -522,7 +576,8 @@ resource "aws_codepipeline" "pipeline" {
   depends_on = [
     aws_codebuild_project.codebuild,
     aws_codebuild_project.codebuild_terraform,
-    aws_codebuild_project.codebuild_terraform_plan
+    aws_codebuild_project.codebuild_terraform_plan,
+    aws_codebuild_project.codebuild_tfsec
   ]
   name     = "${var.source_repo_name}-${var.source_repo_branch}-Pipeline"
   role_arn = aws_iam_role.codepipeline_role.arn
@@ -565,9 +620,9 @@ resource "aws_codepipeline" "pipeline" {
     }
   }
   stage {
-    name = "TerraformActions"
+    name = "tf-sec"
     action {
-      name            = "TerraformPlan"
+      name = "tf-sec"
       category        = "Build"
       owner           = "AWS"
       version         = "1"
@@ -575,16 +630,39 @@ resource "aws_codepipeline" "pipeline" {
       input_artifacts = ["SourceOutput"]
       run_order       = 1
       configuration = {
-        ProjectName = aws_codebuild_project.codebuild_terraform_plan.id
+        ProjectName = aws_codebuild_project.codebuild_tfsec.id
       }
     }
+  }
+  stage {
+    name = "TerraformActions"
     action {
-      name = "Approval"
+      name = "approval-tfsec"
       category = "Approval"
       owner    = "AWS"
       provider = "Manual"
       version  = "1"
-      run_order = 2
+      run_order = 1
+    }
+    action {
+      name            = "TerraformPlan"
+      category        = "Build"
+      owner           = "AWS"
+      version         = "1"
+      provider        = "CodeBuild"
+      input_artifacts = ["SourceOutput"]
+      run_order       = 2
+      configuration = {
+        ProjectName = aws_codebuild_project.codebuild_terraform_plan.id
+      }
+    }
+    action {
+      name = "approval-terraform-plan"
+      category = "Approval"
+      owner    = "AWS"
+      provider = "Manual"
+      version  = "1"
+      run_order = 3
     }
     action {
       name            = "TerraformApply"
@@ -593,7 +671,7 @@ resource "aws_codepipeline" "pipeline" {
       version         = "1"
       provider        = "CodeBuild"
       input_artifacts = ["SourceOutput"]
-      run_order       = 3
+      run_order       = 4
       configuration = {
         ProjectName = aws_codebuild_project.codebuild_terraform.id
       }
