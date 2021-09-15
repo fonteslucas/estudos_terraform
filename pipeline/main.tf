@@ -423,11 +423,24 @@ resource "aws_codebuild_project" "codebuild_tfsec" {
     type                        = "LINUX_CONTAINER"
     privileged_mode             = false
     image_pull_credentials_type = "CODEBUILD"
+    environment_variable {
+      name  = "AWS_DEFAULT_REGION"
+      value = data.aws_region.current.name
+    }
   }
   source {
     type      = "CODEPIPELINE"
     buildspec = <<BUILDSPEC
         version: 0.2
+        env:
+          exported-variables: 
+              - BuildID
+              - BuildTag
+              - Region
+              - checks_errors
+              - check_high
+              - check_warning
+              - check_low
         phases:
             pre_build:
                 commands:
@@ -437,9 +450,18 @@ resource "aws_codebuild_project" "codebuild_tfsec" {
                 commands:
                 - tfsec --version
                 - cd $CODEBUILD_SRC_DIR/infra
-                - ls
                 - tfsec -s --tfvars-file terraform.tfvars --format junit > tfsec/report.xml
-                - ls tfsec
+                - num_errors=$(tfsec -s --tfvars-file terraform.tfvars |  grep ERROR | wc -l)
+                - num_high=$(tfsec -s --tfvars-file terraform.tfvars |  grep HIGH | wc -l)
+                - num_warning=$(tfsec -s --tfvars-file terraform.tfvars |  grep WARNING | wc -l)
+                - num_low=$(tfsec -s --tfvars-file terraform.tfvars |  grep LOW | wc -l)
+                - export BuildID=$(echo $CODEBUILD_BUILD_ID | cut -d':' -f1)
+                - export BuildTag=$(echo $CODEBUILD_BUILD_ID | cut -d':' -f2)
+                - export Region=$AWS_DEFAULT_REGION
+                - export checks_errors=$num_errors
+                - export check_high=$num_high
+                - export check_warning=$num_warning
+                - export check_low=$num_low
         reports:
             tfsec-reports:
               files: 
@@ -537,10 +559,11 @@ resource "aws_codebuild_project" "codebuild_terraform_plan" {
                 - echo "   backend \"s3\" {} " >> backend.tf
                 - echo "}" >> backend.tf
                 - terraform init -input=false --backend-config="bucket=${aws_s3_bucket.tfstate_bucket.id}" --backend-config="key=${var.source_repo_name}-${var.source_repo_branch}.tfsate" --backend-config="region=${data.aws_region.current.name}"
-                - terraform plan -input=false -var-file=./terraform.tfvars
+                - terraform plan -input=false -var-file=./terraform.tfvars -out=output.plan
             post_build:
                 commands:
                 - echo "Terraform completed on `date`"
+                - echo "Check the Plan"
     BUILDSPEC
   }
 }
@@ -591,7 +614,7 @@ resource "aws_codebuild_project" "codebuild_terraform" {
                 - echo "   backend \"s3\" {} " >> backend.tf
                 - echo "}" >> backend.tf
                 - terraform init -input=false --backend-config="bucket=${aws_s3_bucket.tfstate_bucket.id}" --backend-config="key=${var.source_repo_name}-${var.source_repo_branch}.tfsate" --backend-config="region=${data.aws_region.current.name}"
-                - terraform apply -input=false -var-file=./terraform.tfvars -auto-approve
+                - terraform apply output.plan
             post_build:
                 commands:
                 - echo "Terraform completed on `date`"
@@ -657,6 +680,7 @@ resource "aws_codepipeline" "pipeline" {
       provider        = "CodeBuild"
       input_artifacts = ["SourceOutput"]
       run_order       = 1
+      namespace = "TFSEC"
       configuration = {
         ProjectName = aws_codebuild_project.codebuild_tfsec.id
       }
@@ -683,6 +707,10 @@ resource "aws_codepipeline" "pipeline" {
       provider = "Manual"
       version  = "1"
       run_order = 1
+      configuration = {
+        CustomData = "tfsec errors found: #{TFSEC.checks_errors}, tfsec high found: #{TFSEC.check_high}, tfsec warning found: #{TFSEC.check_warning}, tfsec low found: #{TFSEC.check_low}"
+        ExternalEntityLink = "https://#{TFSEC.Region}.console.aws.amazon.com/codesuite/codebuild/${data.aws_caller_identity.current.account_id}/projects/#{TFSEC.BuildID}/build/#{TFSEC.BuildID}%3A#{TFSEC.BuildTag}/reports?region=#{TFSEC.Region}"
+      }
     }
     action {
       name            = "TerraformPlan"
