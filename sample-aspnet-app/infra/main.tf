@@ -1,9 +1,10 @@
-terraform {
-  backend "s3" {}
-}
-
 provider "aws" {
     region = "us-east-1"
+}
+
+data "aws_ecr_image" "app" {
+  repository_name = var.microservicename
+  image_tag       = "latest"
 }
 
 data "aws_caller_identity" "current" {}
@@ -170,7 +171,8 @@ resource "aws_ecs_task_definition" "task_definition" {
     container_definitions = jsonencode ([
         {
             "name": "${var.microservicename}",
-            "image": "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com/${var.microservicename}:latest",
+            //This @${data.aws_ecr_image.app.image_digest} is a Workaround to force a creation of new TaskDefinition even only that changes was in the code
+            "image": "${data.aws_caller_identity.current.account_id}.dkr.ecr.${data.aws_region.current.name}.amazonaws.com/${var.microservicename}:latest@${data.aws_ecr_image.app.image_digest}", 
             "cpu": "${var.cpuunits}"
             "memory" = "${var.memory}"
             "memoryreservation" = "${var.memoryreservation}"
@@ -202,7 +204,10 @@ resource "aws_ecs_service" "ecs_service" {
     launch_type = "EC2"
     task_definition = aws_ecs_task_definition.task_definition.arn
     scheduling_strategy = "REPLICA"
+    force_new_deployment = true
     name = var.microservicename
+    deployment_minimum_healthy_percent = 50
+    deployment_maximum_percent = 200
     ordered_placement_strategy {
         type = "spread"
         field = "attribute:ecs.availability-zone"  
