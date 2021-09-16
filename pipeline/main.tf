@@ -559,11 +559,10 @@ resource "aws_codebuild_project" "codebuild_terraform_plan" {
                 - echo "   backend \"s3\" {} " >> backend.tf
                 - echo "}" >> backend.tf
                 - terraform init -input=false --backend-config="bucket=${aws_s3_bucket.tfstate_bucket.id}" --backend-config="key=${var.source_repo_name}-${var.source_repo_branch}.tfsate" --backend-config="region=${data.aws_region.current.name}"
-                - terraform plan -input=false -var-file=./terraform.tfvars -out=output.plan
+                - terraform plan -input=false -var-file=./terraform.tfvars
             post_build:
                 commands:
                 - echo "Terraform completed on `date`"
-                - echo "Check the Plan"
     BUILDSPEC
   }
 }
@@ -614,7 +613,7 @@ resource "aws_codebuild_project" "codebuild_terraform" {
                 - echo "   backend \"s3\" {} " >> backend.tf
                 - echo "}" >> backend.tf
                 - terraform init -input=false --backend-config="bucket=${aws_s3_bucket.tfstate_bucket.id}" --backend-config="key=${var.source_repo_name}-${var.source_repo_branch}.tfsate" --backend-config="region=${data.aws_region.current.name}"
-                - terraform apply output.plan
+                - terraform apply -input=false -var-file=./terraform.tfvars -auto-approve
             post_build:
                 commands:
                 - echo "Terraform completed on `date`"
